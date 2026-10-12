@@ -1,0 +1,545 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>附近店家掃描（含菜單）</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#EEF1F4;--card:#fff;--ink:#1C2530;--muted:#5B6775;--line:#CCD4DC;--accent:#0F6E68;--lantern:#E8A21A;--dot:#D1453B}
+@media (prefers-color-scheme:dark){:root{--bg:#171C22;--card:#212830;--ink:#E6EAEE;--muted:#9AA5B1;--line:#36404B;--accent:#3FB5AC}}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{font:15px/1.5 "Noto Sans TC","PingFang TC","Microsoft JhengHei",sans-serif;color:var(--ink);background:var(--bg);display:grid;grid-template-columns:480px 1fr}
+#panel{overflow:auto;padding:18px 18px 40px;border-right:1px solid var(--line)}
+#mapWrap{position:relative}
+#map{position:absolute;inset:0}
+h1{font-size:22px;margin:0 0 14px;letter-spacing:.02em}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 12px}
+.row>span{color:var(--muted);font-size:13px;min-width:56px}
+input[type=text],input[type=password],input[type=number],select{font:inherit;color:var(--ink);background:var(--card);border:1px solid var(--line);border-radius:6px;padding:6px 8px;min-width:0}
+input[type=number]{width:90px}
+input:disabled{opacity:.45}
+.grow{flex:1}
+button{font:inherit;border:1px solid var(--line);background:var(--card);color:var(--ink);border-radius:6px;padding:6px 12px;cursor:pointer}
+button:disabled{opacity:.45;cursor:default}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:700;padding:9px 18px}
+:focus-visible{outline:2px solid var(--lantern);outline-offset:2px}
+.chip input{position:absolute;opacity:0}
+.chip span{display:inline-block;padding:5px 12px;border:1px solid var(--line);border-radius:999px;cursor:pointer;background:var(--card)}
+.chip input:checked+span{background:var(--accent);border-color:var(--accent);color:#fff}
+.chip input:focus-visible+span{outline:2px solid var(--lantern)}
+small,.hint{color:var(--muted);font-size:12.5px}
+#status{margin:14px 0 6px;font-size:14px;min-height:21px}
+#bar{height:4px;background:var(--line);border-radius:2px;overflow:hidden;margin-bottom:14px}
+#bar i{display:block;height:100%;width:0;background:var(--lantern);transition:width .3s}
+#list{list-style:none;padding:0;margin:8px 0 0}
+#list li{padding:9px 0;border-top:1px solid var(--line);display:grid;grid-template-columns:1fr 150px;gap:10px}
+.info{min-width:0}
+.menu{border-left:2px solid var(--lantern);padding-left:8px;font-size:13px;line-height:1.6;align-self:start}
+.menu div{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.menu button{font-size:12px;padding:3px 8px}
+#list b{font-weight:500}
+#list a{color:var(--accent);text-decoration:none;font-size:13px}
+.meta{display:flex;justify-content:space-between;gap:10px;color:var(--muted);font-size:13px}
+.err{color:var(--dot)}
+@media (max-width:760px){body{grid-template-columns:1fr;grid-template-rows:45vh auto}#mapWrap{order:-1}#panel{border:0}}
+</style>
+</head>
+<body>
+<aside id="panel">
+  <h1><a href="index.html">附近店家掃描</a></h1>
+
+  <div class="row"><span>API Key</span><input id="key" type="password" class="grow" placeholder="貼上 Google API Key"><button id="saveKey">儲存</button></div>
+  <div class="row"><span>Gemini Key</span><input id="gkey" type="password" class="grow" placeholder="留空 = 用上面那把 Key"><input id="model" type="text" style="width:150px" title="Gemini 模型"></div>
+  <p class="hint" style="margin:-6px 0 12px">只存在這個瀏覽器裡。</p>
+
+  <div class="row"><span>地圖</span>
+    <label class="chip"><input type="radio" name="prov" value="osm"><span>OpenStreetMap</span></label>
+    <label class="chip"><input type="radio" name="prov" value="google"><span>Google 地圖</span></label>
+  </div>
+
+  <div class="row"><span>地點</span><input id="addr" type="text" class="grow" placeholder="輸入地址、地標或座標"><button id="geo">查詢</button></div>
+  <div class="row"><span></span><button id="here">使用目前位置</button><small id="centerTxt">或直接點地圖選中心點</small></div>
+
+  <div class="row"><span>半徑</span><input id="radius" type="number" min="100" max="10000" step="100" value="1000"><small>公尺（100–10000）</small></div>
+  <div class="row"><span>呼叫上限</span><input id="limit" type="number" min="1" max="50" value="20"><small>次（1–50）</small></div>
+
+  <div class="row" id="types"><span>類型</span></div>
+
+  <div class="row"><label><input type="checkbox" id="priceOn"> 只顯示符合價格的店</label></div>
+  <div class="row"><span>每人消費</span><input id="pmin" type="number" min="0" value="1" disabled> 到 <input id="pmax" type="number" min="1" value="200" disabled><small>元</small></div>
+
+  <div class="row">
+    <button id="go" class="primary">開始搜尋</button>
+    <button id="stop" disabled>中斷並彙整</button>
+  </div>
+  <label class="hint"><input type="checkbox" id="force"> 忽略 7 天內的暫存，重新花 API 搜尋</label>
+
+  <div id="status"></div>
+  <div id="bar"><i></i></div>
+
+  <div class="row">
+    <select id="sort">
+      <option value="d">距離：近到遠</option>
+      <option value="-d">距離：遠到近</option>
+      <option value="n">名稱：A→Z</option>
+      <option value="-n">名稱：Z→A</option>
+    </select>
+    <button id="csv" disabled>匯出 CSV</button>
+  </div>
+  <div class="row"><button id="menuGo">AI 分析菜單</button><span style="min-width:0">前</span><input id="menuN" type="number" min="1" max="50" value="5"><small>家（已分析過的讀暫存）</small></div>
+  <ol id="list"></ol>
+</aside>
+<div id="mapWrap"><div id="map"></div></div>
+
+<script>
+const TYPES = {
+  '小吃': ['fast_food_restaurant', 'meal_takeaway'],
+  '甜點': ['dessert_shop', 'bakery', 'cafe'],
+  '餐廳': ['restaurant'],
+  '超商': ['convenience_store'],
+};
+const CACHE_DAYS = 7, MIN_R = 40;
+const $ = id => document.getElementById(id);
+const store = {
+  get(k) { try { return JSON.parse(localStorage.getItem(k)); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
+};
+
+let center = null, results = new Map(), running = false, stopFlag = false;
+let provider = store.get('provider') || 'osm', map = null;
+
+// ---------- 幾何 ----------
+function dist(a, b) {
+  const r = Math.PI / 180, dLat = (b.lat - a.lat) * r, dLng = (b.lng - a.lng) * r;
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(a.lat * r) * Math.cos(b.lat * r) * Math.sin(dLng / 2) ** 2;
+  return 2 * 6371000 * Math.asin(Math.sqrt(h));
+}
+const offset = (p, dx, dy) => ({ lat: p.lat + dy / 111320, lng: p.lng + dx / (111320 * Math.cos(p.lat * Math.PI / 180)) });
+const fmtD = d => d < 1000 ? Math.round(d) + ' m' : (d / 1000).toFixed(2) + ' km';
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+// ---------- 地圖樣式 ----------
+const STY = {
+  area:    { color: '#0F6E68', weight: 2, fill: 0.04, dash: null },
+  pending: { color: '#8A96A3', weight: 1, fill: 0,    dash: '4 4' },
+  active:  { color: '#E8A21A', weight: 2, fill: 0.30, dash: null },
+  split:   { color: '#C9731E', weight: 1, fill: 0.03, dash: null },
+  done:    { color: '#0F6E68', weight: 1, fill: 0.10, dash: null },
+};
+
+// ---------- 地圖轉接層：OSM(Leaflet) 與 Google 共用同一組介面 ----------
+const Adapters = {
+  osm: {
+    init(el) {
+      this.m = L.map(el).setView([23.7, 121], 7);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(this.m);
+      this.g = L.layerGroup().addTo(this.m);
+      this.m.on('click', e => setCenter({ lat: e.latlng.lat, lng: e.latlng.lng }));
+    },
+    destroy() { this.m.remove(); },
+    clear() { this.g.clearLayers(); },
+    circle(c, r, k) {
+      const s = x => ({ color: STY[x].color, weight: STY[x].weight, fillColor: STY[x].color, fillOpacity: STY[x].fill, dashArray: STY[x].dash });
+      const o = L.circle([c.lat, c.lng], { radius: r, interactive: false, ...s(k) }).addTo(this.g);
+      return { set: x => o.setStyle(s(x)) };
+    },
+    dot(p, title, big) {
+      L.circleMarker([p.lat, p.lng], { radius: big ? 7 : 4, color: '#fff', weight: 1, fillColor: big ? '#0F6E68' : '#D1453B', fillOpacity: 1 })
+        .bindTooltip(esc(title)).addTo(this.g);
+    },
+    fit(c, r) { this.m.fitBounds(L.latLng(c.lat, c.lng).toBounds(r * 2.2)); },
+    async geocode(q) {
+      const r = await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&accept-language=zh-TW&q=' + encodeURIComponent(q));
+      const j = await r.json();
+      if (!j.length) throw new Error('找不到這個地點，換個寫法試試');
+      return { lat: +j[0].lat, lng: +j[0].lon };
+    },
+  },
+  google: {
+    init(el) {
+      this.m = new google.maps.Map(el, { center: { lat: 23.7, lng: 121 }, zoom: 7, clickableIcons: false, streetViewControl: false, mapTypeControl: false });
+      this.items = [];
+      this.m.addListener('click', e => setCenter({ lat: e.latLng.lat(), lng: e.latLng.lng() }));
+    },
+    destroy() { this.clear(); },
+    clear() { this.items.forEach(i => i.setMap(null)); this.items = []; },
+    circle(c, r, k) {
+      const s = x => ({ strokeColor: STY[x].color, strokeWeight: STY[x].weight, strokeOpacity: STY[x].dash ? 0.6 : 1, fillColor: STY[x].color, fillOpacity: STY[x].fill });
+      const o = new google.maps.Circle({ map: this.m, center: c, radius: r, clickable: false, ...s(k) });
+      this.items.push(o);
+      return { set: x => o.setOptions(s(x)) };
+    },
+    dot(p, title, big) {
+      this.items.push(new google.maps.Marker({
+        map: this.m, position: p, title,
+        icon: { path: google.maps.SymbolPath.CIRCLE, scale: big ? 7 : 4, fillColor: big ? '#0F6E68' : '#D1453B', fillOpacity: 1, strokeColor: '#fff', strokeWeight: 1 },
+      }));
+    },
+    fit(c, r) {
+      const b = new google.maps.LatLngBounds();
+      b.extend(offset(c, -r * 1.1, -r * 1.1)); b.extend(offset(c, r * 1.1, r * 1.1));
+      this.m.fitBounds(b);
+    },
+    async geocode(q) {
+      const { results } = await new google.maps.Geocoder().geocode({ address: q, region: 'tw' });
+      if (!results.length) throw new Error('找不到這個地點，換個寫法試試');
+      const l = results[0].geometry.location;
+      return { lat: l.lat(), lng: l.lng() };
+    },
+  },
+};
+
+function loadGoogle(key) {
+  return new Promise((res, rej) => {
+    if (window.google?.maps?.Map) return res();
+    window.__gmReady = res;
+    window.gm_authFailure = () => status('Google 地圖金鑰無效，或尚未啟用 Maps JavaScript API。', true);
+    const s = document.createElement('script');
+    s.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(key)}&callback=__gmReady&loading=async`;
+    s.onerror = () => rej(new Error('Google 地圖載入失敗'));
+    document.head.appendChild(s);
+  });
+}
+
+async function useProvider(p) {
+  if (p === 'google') {
+    const key = $('key').value.trim();
+    if (!key) { status('使用 Google 地圖前，請先貼上 API Key。', true); p = 'osm'; }
+    else { try { await loadGoogle(key); } catch (e) { status(e.message, true); p = 'osm'; } }
+  }
+  if (map) map.destroy();
+  const old = $('map'), el = document.createElement('div');
+  el.id = 'map'; old.replaceWith(el);
+  provider = p; store.set('provider', p);
+  document.querySelector(`input[name=prov][value=${p}]`).checked = true;
+  map = Adapters[p]; map.init(el);
+  redraw(); if (center) map.fit(center, radius());
+}
+
+// ---------- 介面 ----------
+function status(msg, err) { $('status').innerHTML = `<span class="${err ? 'err' : ''}">${esc(msg)}</span>`; }
+const radius = () => Math.min(10000, Math.max(100, +$('radius').value || 1000));
+const limit = () => Math.min(50, Math.max(1, +$('limit').value || 20));
+const chosenTypes = () => [...document.querySelectorAll('#types input:checked')].map(i => i.value);
+
+const LEVEL = { PRICE_LEVEL_FREE: '免費', PRICE_LEVEL_INEXPENSIVE: '便宜', PRICE_LEVEL_MODERATE: '中等', PRICE_LEVEL_EXPENSIVE: '偏貴', PRICE_LEVEL_VERY_EXPENSIVE: '很貴' };
+let priced = false; // 目前的結果是否有抓價格
+const priceOn = () => $('priceOn').checked;
+function priceText(r) {
+  if (!priced) return '';
+  if (r.start != null) return r.end != null ? `$${r.start}–${r.end}` : `$${r.start} 以上`;
+  return r.level ? (LEVEL[r.level] || r.level) : '查無價格';
+}
+// Google 的區間是固定分段（$1–200、$200–400…），整段落在設定範圍內才算符合
+function passes(r) {
+  if (!priceOn()) return true;
+  const min = +$('pmin').value || 0, max = +$('pmax').value || Infinity;
+  return r.start != null && r.end != null && r.start >= min && r.end <= max;
+}
+const shown = () => [...results.values()].filter(passes);
+
+function redraw() {
+  map.clear();
+  if (!center) return;
+  map.circle(center, radius(), 'area');
+  map.dot(center, '搜尋中心', true);
+  shown().forEach(r => map.dot(r, r.name));
+}
+
+function setCenter(c) {
+  if (running) return;
+  center = c;
+  $('centerTxt').textContent = `中心：${c.lat.toFixed(5)}, ${c.lng.toFixed(5)}`;
+  results.clear(); renderList(); redraw(); map.fit(c, radius());
+}
+
+function sorted() {
+  const s = $('sort').value, arr = shown();
+  const byName = (a, b) => a.name.localeCompare(b.name, 'zh-Hant');
+  return arr.sort({ d: (a, b) => a.d - b.d, '-d': (a, b) => b.d - a.d, n: byName, '-n': (a, b) => byName(b, a) }[s]);
+}
+const gLink = r => `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(r.name)}&query_place_id=${r.id}`;
+
+function menuHTML(r) {
+  if (menuBusy.has(r.id)) return '<small>分析中…</small>';
+  if (menuErr.has(r.id)) return `<small class="err" title="${esc(menuErr.get(r.id))}">失敗</small> <button data-menu="${r.id}">重試</button>`;
+  const m = menuOf(r.id);
+  if (!m) return `<button data-menu="${r.id}">看菜單</button>`;
+  if (!m.items.length) return '<small>查無菜單照片</small>';
+  return m.items.map(i => `<div title="${esc(i.name)}">${esc(i.name)} $${i.price}</div>`).join('');
+}
+
+function renderList() {
+  $('list').innerHTML = sorted().map(r =>
+    `<li><div class="info"><b>${esc(r.name)}</b><div class="meta"><span>${esc(r.addr)}</span><span>${fmtD(r.d)}</span></div>${priced ? `<div class="meta"><span>每人消費 ${priceText(r)}</span></div>` : ''}<a href="${gLink(r)}" target="_blank" rel="noopener">在 Google 地圖開啟</a></div><div class="menu">${menuHTML(r)}</div></li>`
+  ).join('');
+  $('csv').disabled = !shown().length;
+}
+
+function exportCSV() {
+  const q = v => `"${String(v).replace(/"/g, '""')}"`;
+  const menuTxt = r => (menuOf(r.id)?.items || []).map(i => `${i.name} $${i.price}`).join(' / ');
+  const rows = [['名稱', '地址', '每人消費', '推薦餐點', '距離(公尺)', 'Google地圖連結'], ...sorted().map(r => [r.name, r.addr, priceText(r), menuTxt(r), Math.round(r.d), gLink(r)])];
+  const blob = new Blob(['\uFEFF' + rows.map(r => r.map(q).join(',')).join('\r\n')], { type: 'text/csv' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `店家_${new Date().toISOString().slice(0, 10)}.csv`;
+  a.click(); URL.revokeObjectURL(a.href);
+}
+
+// ---------- 搜尋核心 ----------
+async function nearby(c, r, types, key, withPrice) {
+  const res = await fetch('https://places.googleapis.com/v1/places:searchNearby', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Goog-Api-Key': key,
+      // 不勾價格：Pro 等級；勾價格：多兩個欄位 → Enterprise 等級
+      'X-Goog-FieldMask': 'places.id,places.displayName,places.formattedAddress,places.location' + (withPrice ? ',places.priceLevel,places.priceRange' : ''),
+    },
+    body: JSON.stringify({
+      includedTypes: types, maxResultCount: 20, rankPreference: 'DISTANCE',
+      languageCode: 'zh-TW', regionCode: 'TW',
+      locationRestriction: { circle: { center: { latitude: c.lat, longitude: c.lng }, radius: r } },
+    }),
+  });
+  const j = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error('Places API 錯誤：' + (j.error?.message || res.status));
+  return j.places || [];
+}
+
+const cacheKey = (c, R, types, withPrice) =>
+  `scan:${withPrice ? 'price:' : ''}${(Math.round(c.lat / 5e-4) * 5e-4).toFixed(4)},${(Math.round(c.lng / 5e-4) * 5e-4).toFixed(4)}:${R}:${[...types].sort().join('+')}`;
+
+async function scan() {
+  const key = $('key').value.trim();
+  if (!key) return status('請先貼上 API Key。', true);
+  if (!center) return status('請先輸入地點或點地圖選中心點。', true);
+  const labels = chosenTypes();
+  if (!labels.length) return status('至少勾選一個類型。', true);
+  const types = [...new Set(labels.flatMap(l => TYPES[l]))];
+  const R = radius(), max = limit(), withPrice = priceOn(), ck = cacheKey(center, R, types, withPrice);
+
+  if (!$('force').checked) {
+    const c = store.get(ck);
+    if (c && Date.now() - c.t < CACHE_DAYS * 864e5) {
+      results = new Map(c.items.map(x => [x.id, { ...x, d: dist(center, x) }])); priced = withPrice;
+      redraw(); renderList(); $('bar').firstChild.style.width = '100%';
+      return status(`讀取 ${new Date(c.t).toLocaleString()} 的暫存，共 ${results.size} 家` + (withPrice ? `（符合價格 ${shown().length} 家）` : '') + `，沒有花 API。` + (c.done ? '' : '（上次沒搜完，可勾選「忽略暫存」重搜）'));
+    }
+  }
+
+  running = true; stopFlag = false;
+  $('go').disabled = true; $('stop').disabled = false;
+  results.clear(); priced = withPrice; renderList(); redraw();
+
+  // 佇列依「子區域中心離搜尋中心的距離」排序 → 永遠先搜近的
+  const queue = [{ c: center, r: R, d: 0, h: map.circle(center, R, 'pending') }];
+  let calls = 0, error = null;
+
+  while (queue.length && calls < max && !stopFlag) {
+    queue.sort((a, b) => a.d - b.d);
+    const q = queue.shift();
+    q.h.set('active');
+    status(`搜尋中… 第 ${calls + 1} / ${max} 次，已找到 ${results.size} 家`);
+    let places;
+    try { places = await nearby(q.c, q.r, types, key, withPrice); }
+    catch (e) { error = e; q.h.set('pending'); queue.unshift(q); break; }
+    calls++;
+    $('bar').firstChild.style.width = (calls / max * 100) + '%';
+
+    for (const p of places) {
+      const loc = { lat: p.location.latitude, lng: p.location.longitude }, d = dist(center, loc);
+      if (d <= R && !results.has(p.id)) {
+        const pr = p.priceRange || {};
+        const item = { id: p.id, name: p.displayName?.text || '(無名稱)', addr: p.formattedAddress || '', ...loc, d,
+          level: p.priceLevel || null,
+          start: pr.startPrice ? +pr.startPrice.units || 0 : null,
+          end: pr.endPrice ? +pr.endPrice.units || 0 : null };
+        results.set(p.id, item); if (passes(item)) map.dot(loc, item.name);
+      }
+    }
+
+    // 滿 20 筆 → 可能還有更多，切成四塊（每塊蓋住原本的四分之一）
+    if (places.length >= 20 && q.r > MIN_R) {
+      q.h.set('split');
+      const cr = q.r * Math.SQRT1_2;
+      for (const [dx, dy] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) {
+        const c = offset(q.c, dx * q.r / 2, dy * q.r / 2), d = dist(center, c);
+        if (d - cr < R) queue.push({ c, r: cr, d, h: map.circle(c, cr, 'pending') });
+      }
+    } else q.h.set('done');
+    renderList();
+  }
+
+  const done = !queue.length && !error;
+  if (results.size || done) store.set(ck, { t: Date.now(), done, items: [...results.values()].map(({ d, ...x }) => x) });
+  running = false; $('go').disabled = false; $('stop').disabled = true;
+
+  const tail = `呼叫 ${calls} 次，找到 ${results.size} 家` + (withPrice ? `，符合價格 ${shown().length} 家。` : '。');
+  if (error) status(`${error.message}　目前結果：${tail}`, true);
+  else if (done) status(`搜尋完成：${tail}`);
+  else status(`${stopFlag ? '已中斷' : '已達呼叫上限'}：${tail}還有 ${queue.length} 個較遠的區域沒搜。`);
+}
+
+// ---------- AI 菜單：Place Details 拿照片 → Place Photo 下載 → Gemini 讀菜單 ----------
+const MENU_DAYS = 30, MENU_PHOTOS = 6, DEFAULT_MODEL = 'gemini-3.6-flash';
+const FALLBACK_MODELS = ['gemini-3.1-flash-lite', 'gemini-2.5-flash'];
+const menuBusy = new Set(), menuErr = new Map();
+let menuRunning = false;
+function menuOf(id) {
+  const m = store.get('menu:' + id);
+  return m && Date.now() - m.t < MENU_DAYS * 864e5 ? m : null;
+}
+
+// 只要 photos 欄位 → Place Details Essentials (IDs Only) 等級
+async function photoNames(id, key) {
+  const res = await fetch(`https://places.googleapis.com/v1/places/${id}`, { headers: { 'X-Goog-Api-Key': key, 'X-Goog-FieldMask': 'photos' } });
+  const j = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error('Place Details 錯誤：' + (j.error?.message || res.status));
+  return (j.photos || []).slice(0, MENU_PHOTOS).map(p => p.name);
+}
+
+async function photoBase64(name, key) {
+  const res = await fetch(`https://places.googleapis.com/v1/${name}/media?maxWidthPx=1000&skipHttpRedirect=true&key=${encodeURIComponent(key)}`);
+  const j = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error('Place Photo 錯誤：' + (j.error?.message || res.status));
+  const blob = await (await fetch(j.photoUri)).blob();
+  const data = await new Promise(ok => { const fr = new FileReader(); fr.onload = () => ok(fr.result.split(',')[1]); fr.readAsDataURL(blob); });
+  return { inline_data: { mime_type: blob.type || 'image/jpeg', data } };
+}
+
+async function askGemini(images, shop, key, model) {
+  const prompt = `以下是「${shop}」在 Google 地圖上的照片。請找出其中的菜單或價目表照片（其他照片忽略），` +
+    `挑出一般人來這家店最常點、而且一份就吃得飽的餐點（主餐優先，不要飲料、小菜、加點），最多 3 樣，依推薦程度排序。` +
+    `品名要簡短（10 字內，可含份量如「水餃10顆」），價格用新台幣整數，必須是照片上看得到的價格，不要猜。` +
+    `如果沒有任何菜單照片或看不清楚價格，items 回傳空陣列。`;
+  const body = JSON.stringify({
+    contents: [{ parts: [{ text: prompt }, ...images] }],
+    generationConfig: {
+      responseMimeType: 'application/json',
+      responseSchema: { type: 'OBJECT', properties: { items: { type: 'ARRAY', items: {
+        type: 'OBJECT', properties: { name: { type: 'STRING' }, price: { type: 'INTEGER' } }, required: ['name', 'price'] } } }, required: ['items'] },
+    },
+  });
+  // 忙線(503)/限流(429)/伺服器錯誤：同模型退避重試，仍失敗就換備用模型
+  const models = [...new Set([model, ...FALLBACK_MODELS])];
+  let lastErr;
+  for (const m of models) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt) await new Promise(ok => setTimeout(ok, 2000 * 2 ** (attempt - 1)));
+      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(m)}:generateContent`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key }, body,
+      });
+      const j = await res.json().catch(() => ({}));
+      if (res.ok) {
+        const txt = j.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '{}';
+        return (JSON.parse(txt).items || []).filter(i => i.name && i.price > 0).slice(0, 3);
+      }
+      lastErr = new Error(`Gemini 錯誤（${m}）：` + (j.error?.message || res.status));
+      if (res.status === 404) break;                       // 模型不存在 → 直接換下一個
+      if (![429, 500, 503].includes(res.status)) throw lastErr; // 金鑰、額度等問題不重試
+    }
+  }
+  throw lastErr;
+}
+
+async function analyzeMenu(r) {
+  const key = $('key').value.trim(), gkey = $('gkey').value.trim() || key, model = $('model').value.trim() || DEFAULT_MODEL;
+  if (!key) throw new Error('請先貼上 API Key。');
+  menuBusy.add(r.id); menuErr.delete(r.id); renderList();
+  try {
+    const names = await photoNames(r.id, key);
+    const images = (await Promise.allSettled(names.map(n => photoBase64(n, key)))).filter(x => x.status === 'fulfilled').map(x => x.value);
+    if (names.length && !images.length) throw new Error('照片下載失敗');
+    const items = images.length ? await askGemini(images, r.name, gkey, model) : [];
+    store.set('menu:' + r.id, { t: Date.now(), items });
+  } catch (e) { menuErr.set(r.id, e.message); throw e; }
+  finally { menuBusy.delete(r.id); renderList(); }
+}
+
+async function analyzeMenus() {
+  if (menuRunning) return;
+  const n = Math.min(50, Math.max(1, +$('menuN').value || 5));
+  const todo = sorted().slice(0, n).filter(r => !menuOf(r.id));
+  if (!todo.length) return status(shown().length ? `前 ${n} 家都已分析過（讀暫存，沒花 API）。` : '請先搜尋店家。');
+  menuRunning = true; $('menuGo').disabled = true;
+  let ok = 0;
+  for (const r of todo) {
+    status(`AI 分析菜單… ${ok + 1} / ${todo.length}：${r.name}`);
+    try { await analyzeMenu(r); ok++; } catch (e) { status(e.message, true); break; }
+  }
+  menuRunning = false; $('menuGo').disabled = false;
+  if (ok === todo.length) status(`菜單分析完成：${ok} 家（每家最多 ${MENU_PHOTOS} 張照片 + 1 次 Gemini）。`);
+}
+
+// ---------- 初始化 ----------
+function cleanCache() {
+  for (let i = localStorage.length - 1; i >= 0; i--) {
+    const k = localStorage.key(i), t = store.get(k)?.t || 0;
+    if (k?.startsWith('scan:') && Date.now() - t > CACHE_DAYS * 864e5) localStorage.removeItem(k);
+    if (k?.startsWith('menu:') && Date.now() - t > MENU_DAYS * 864e5) localStorage.removeItem(k);
+  }
+}
+
+Object.keys(TYPES).forEach(t => $('types').insertAdjacentHTML('beforeend',
+  `<label class="chip"><input type="checkbox" value="${t}" checked><span>${t}</span></label>`));
+$('key').value = store.get('apiKey') || '';
+$('gkey').value = store.get('geminiKey') || '';
+$('model').value = store.get('geminiModel') || DEFAULT_MODEL;
+$('saveKey').onclick = () => {
+  store.set('apiKey', $('key').value.trim()); store.set('geminiKey', $('gkey').value.trim()); store.set('geminiModel', $('model').value.trim());
+  status('API Key 已儲存。');
+};
+$('menuGo').onclick = analyzeMenus;
+$('list').onclick = e => {
+  const id = e.target.dataset?.menu, r = id && results.get(id);
+  if (r && !menuBusy.has(id)) analyzeMenu(r).catch(err => status(err.message, true));
+};
+document.querySelectorAll('input[name=prov]').forEach(r => r.onchange = () => !running && useProvider(r.value));
+// 辨識座標：24°14'59.7"N 120°40'54.3"E 或 24.2499, 120.6818
+function parseCoords(q) {
+  const dms = [...q.matchAll(/(\d+(?:\.\d+)?)\s*°\s*(?:(\d+(?:\.\d+)?)\s*['′’]\s*)?(?:(\d+(?:\.\d+)?)\s*(?:["″”]|'')\s*)?([NSEW])/gi)];
+  if (dms.length === 2) {
+    const v = {};
+    for (const [, d, m = 0, s = 0, h] of dms) {
+      const x = (+d + m / 60 + s / 3600) * (/[SW]/i.test(h) ? -1 : 1);
+      v[/[NS]/i.test(h) ? 'lat' : 'lng'] = x;
+    }
+    if (v.lat != null && v.lng != null) return v;
+  }
+  const dec = q.match(/^\s*(-?\d{1,2}(?:\.\d+)?)\s*[,，\s]\s*(-?\d{1,3}(?:\.\d+)?)\s*$/);
+  if (dec && Math.abs(dec[1]) <= 90 && Math.abs(dec[2]) <= 180) return { lat: +dec[1], lng: +dec[2] };
+  return null;
+}
+$('geo').onclick = async () => {
+  const q = $('addr').value.trim(); if (!q) return;
+  try { setCenter(parseCoords(q) || await map.geocode(q)); } catch (e) { status(e.message || '查詢地點失敗', true); }
+};
+$('addr').onkeydown = e => { if (e.key === 'Enter' && !e.isComposing) $('geo').click(); };
+$('here').onclick = () => navigator.geolocation?.getCurrentPosition(
+  p => setCenter({ lat: p.coords.latitude, lng: p.coords.longitude }),
+  () => status('無法取得目前位置，請改用輸入或點地圖。', true));
+$('radius').onchange = () => { if (center && !running) { results.clear(); renderList(); redraw(); map.fit(center, radius()); } };
+$('go').onclick = scan;
+$('stop').onclick = () => { stopFlag = true; status('等這一次呼叫回來後就停止…'); };
+$('sort').onchange = renderList;
+const refilter = () => { if (!running) { renderList(); redraw(); } };
+$('priceOn').onchange = () => {
+  $('pmin').disabled = $('pmax').disabled = !priceOn();
+  if (priceOn() && results.size && !priced) status('目前的結果沒有價格資料，請重新按「開始搜尋」。', true);
+  refilter();
+};
+$('pmin').oninput = $('pmax').oninput = refilter;
+$('csv').onclick = exportCSV;
+
+cleanCache();
+useProvider(provider);
+</script>
+</body>
+</html>

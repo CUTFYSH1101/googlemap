@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>店家價格查詢</title>
+<link rel="stylesheet" href="style.css">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#EEF1F4;--card:#fff;--ink:#1C2530;--muted:#5B6775;--line:#CCD4DC;--accent:#0F6E68;--lantern:#E8A21A;--bad:#D1453B}
+@media (prefers-color-scheme:dark){:root{--bg:#171C22;--card:#212830;--ink:#E6EAEE;--muted:#9AA5B1;--line:#36404B;--accent:#3FB5AC}}
+*{box-sizing:border-box}
+body{margin:0;font:15px/1.5 "Noto Sans TC","PingFang TC","Microsoft JhengHei",sans-serif;color:var(--ink);background:var(--bg)}
+main{max-width:920px;margin:0 auto;padding:24px 18px 60px}
+h1{font-size:22px;margin:0 0 16px}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 12px}
+.row>span{color:var(--muted);font-size:13px;min-width:64px}
+input[type=password],input[type=number]{font:inherit;color:var(--ink);background:var(--card);border:1px solid var(--line);border-radius:6px;padding:6px 8px}
+input[type=number]{width:90px}
+input[type=password]{flex:1;min-width:200px}
+button{font:inherit;border:1px solid var(--line);background:var(--card);color:var(--ink);border-radius:6px;padding:6px 12px;cursor:pointer}
+button:disabled{opacity:.45;cursor:default}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:700;padding:9px 18px}
+:focus-visible{outline:2px solid var(--lantern);outline-offset:2px}
+small{color:var(--muted);font-size:12.5px}
+#status{margin:14px 0 6px;min-height:21px}
+.err{color:var(--bad)}
+#bar{height:4px;background:var(--line);border-radius:2px;overflow:hidden;margin-bottom:16px}
+#bar i{display:block;height:100%;width:0;background:var(--lantern);transition:width .3s}
+.tablewrap{overflow-x:auto;background:var(--card);border:1px solid var(--line);border-radius:8px}
+table{border-collapse:collapse;width:100%;font-size:14px}
+th,td{padding:8px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+th{font-weight:500;color:var(--muted);white-space:nowrap}
+td.p{white-space:nowrap}
+tr.in td.p{color:var(--accent);font-weight:700}
+a{color:var(--accent)}
+</style>
+</head>
+<body>
+<main>
+  <h1><a href="index.html">店家價格查詢</a></h1>
+
+  <div class="row"><span>API Key</span><input id="key" type="password" placeholder="貼上 Google API Key"><button id="saveKey">儲存</button></div>
+  <div class="row"><span>店家清單</span><input id="file" type="file" accept=".csv" multiple><small>可一次選多個 CSV，會自動去重複</small></div>
+  <div class="row"><span>每人消費</span><input id="min" type="number" value="1" min="0"> 到 <input id="max" type="number" value="200" min="1"> 元</div>
+  <div class="row"><span>呼叫上限</span><input id="limit" type="number" value="200" min="1"><small>30 天內查過的店讀暫存，不重複計費</small></div>
+  <div class="row">
+    <label><input type="checkbox" id="onlyIn" checked> 只顯示符合價格的店</label>
+    <label><input type="checkbox" id="keepNA"> 也保留「查無價格」的店</label>
+  </div>
+  <div class="row">
+    <button id="go" class="primary" disabled>查詢價格</button>
+    <button id="stop" disabled>中斷</button>
+    <button id="csv" disabled>匯出 CSV</button>
+  </div>
+
+  <div id="status">先選擇從掃描工具匯出的 CSV。</div>
+  <div id="bar"><i></i></div>
+  <div class="tablewrap"><table><thead><tr><th>名稱</th><th>地址</th><th>每人消費</th><th>距離</th></tr></thead><tbody id="tb"></tbody></table></div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const CACHE_DAYS = 30;
+const LEVEL = { PRICE_LEVEL_FREE: '免費', PRICE_LEVEL_INEXPENSIVE: '便宜', PRICE_LEVEL_MODERATE: '中等', PRICE_LEVEL_EXPENSIVE: '偏貴', PRICE_LEVEL_VERY_EXPENSIVE: '很貴' };
+const store = {
+  get(k) { try { return JSON.parse(localStorage.getItem(k)); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
+};
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+let rows = [], stopFlag = false;
+
+function status(m, err) { $('status').innerHTML = `<span class="${err ? 'err' : ''}">${esc(m)}</span>`; }
+
+// 解析 CSV（支援引號、逗號、換行）
+function parseCSV(text) {
+  text = text.replace(/^\uFEFF/, '');
+  const out = []; let row = [], f = '', q = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (q) { if (c === '"') { if (text[i + 1] === '"') { f += '"'; i++; } else q = false; } else f += c; }
+    else if (c === '"') q = true;
+    else if (c === ',') { row.push(f); f = ''; }
+    else if (c === '\n' || c === '\r') { if (c === '\r' && text[i + 1] === '\n') i++; row.push(f); out.push(row); row = []; f = ''; }
+    else f += c;
+  }
+  if (f || row.length) { row.push(f); out.push(row); }
+  return out.filter(r => r.some(x => x));
+}
+
+$('file').onchange = async e => {
+  const map = new Map();
+  for (const file of e.target.files) {
+    const [head, ...data] = parseCSV(await file.text());
+    const iN = head.indexOf('名稱'), iA = head.indexOf('地址'), iD = head.findIndex(h => h.startsWith('距離')), iL = head.findIndex(h => h.includes('連結'));
+    for (const r of data) {
+      const id = (r[iL] || '').match(/query_place_id=([^&]+)/)?.[1];
+      if (!id) continue;
+      const d = +r[iD] || Infinity, old = map.get(id);
+      if (!old || d < old.d) map.set(id, { id, name: r[iN], addr: r[iA], d, link: r[iL] });
+    }
+  }
+  rows = [...map.values()].sort((a, b) => a.d - b.d);
+  rows.forEach(r => Object.assign(r, store.get('price:' + r.id)?.v || {}));
+  const need = rows.filter(r => !r.checked).length;
+  status(`載入 ${rows.length} 家（已去重複），其中 ${need} 家需要查詢。`);
+  $('go').disabled = !rows.length; render();
+};
+
+// 價格判斷
+function priceText(r) {
+  if (r.start != null) return r.end != null ? `$${r.start}–${r.end}` : `$${r.start} 以上`;
+  if (r.level) return LEVEL[r.level] || r.level;
+  return r.checked ? '查無價格' : '尚未查詢';
+}
+function inRange(r) {
+  const min = +$('min').value || 0, max = +$('max').value || Infinity;
+  return r.start != null && r.end != null && r.start >= min && r.end <= max;
+}
+function visible() {
+  return rows.filter(r => !$('onlyIn').checked || inRange(r) || ($('keepNA').checked && r.checked && r.start == null));
+}
+
+function render() {
+  $('tb').innerHTML = visible().map(r =>
+    `<tr class="${inRange(r) ? 'in' : ''}"><td><a href="${esc(r.link)}" target="_blank" rel="noopener">${esc(r.name)}</a></td><td>${esc(r.addr)}</td><td class="p">${priceText(r)}</td><td>${isFinite(r.d) ? r.d + ' m' : ''}</td></tr>`
+  ).join('');
+  $('csv').disabled = !visible().length;
+}
+['min', 'max', 'onlyIn', 'keepNA'].forEach(id => $(id).addEventListener('input', render));
+
+async function details(id, key) {
+  const res = await fetch(`https://places.googleapis.com/v1/places/${id}`, {
+    headers: { 'X-Goog-Api-Key': key, 'X-Goog-FieldMask': 'priceLevel,priceRange' },
+  });
+  const j = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error('Places API 錯誤：' + (j.error?.message || res.status));
+  return {
+    checked: true,
+    level: j.priceLevel || null,
+    start: j.priceRange?.startPrice ? +j.priceRange.startPrice.units || 0 : null,
+    end: j.priceRange?.endPrice ? +j.priceRange.endPrice.units || 0 : null,
+  };
+}
+
+$('go').onclick = async () => {
+  const key = $('key').value.trim();
+  if (!key) return status('請先貼上 API Key。', true);
+  const todo = rows.filter(r => !r.checked).slice(0, Math.max(1, +$('limit').value || 1));
+  if (!todo.length) return status('全部都查過了（30 天內的暫存）。');
+  stopFlag = false; $('go').disabled = true; $('stop').disabled = false;
+  let n = 0, err = null;
+  // 同時 4 個請求，加快速度
+  const worker = async () => {
+    while (todo.length && !stopFlag && !err) {
+      const r = todo.shift();
+      try {
+        const v = await details(r.id, key);
+        Object.assign(r, v); store.set('price:' + r.id, { t: Date.now(), v });
+        n++; $('bar').firstChild.style.width = (n / (n + todo.length) * 100) + '%';
+        status(`查詢中… 已完成 ${n} 家`); render();
+      } catch (e) { err = e; }
+    }
+  };
+  await Promise.all([worker(), worker(), worker(), worker()]);
+  $('go').disabled = false; $('stop').disabled = true;
+  const ok = rows.filter(inRange).length, left = rows.filter(r => !r.checked).length;
+  status((err ? err.message + '　' : '') + `本次呼叫 ${n} 次。符合價格的有 ${ok} 家` + (left ? `，還有 ${left} 家沒查。` : '。'), !!err);
+  render();
+};
+$('stop').onclick = () => { stopFlag = true; status('等進行中的請求回來後停止…'); };
+
+$('csv').onclick = () => {
+  const q = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
+  const lines = [['名稱', '地址', '每人消費', '距離(公尺)', 'Google地圖連結'], ...visible().map(r => [r.name, r.addr, priceText(r), isFinite(r.d) ? r.d : '', r.link])];
+  const blob = new Blob(['\uFEFF' + lines.map(l => l.map(q).join(',')).join('\r\n')], { type: 'text/csv' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = `店家_價格篩選_${new Date().toISOString().slice(0, 10)}.csv`;
+  a.click(); URL.revokeObjectURL(a.href);
+};
+
+$('key').value = store.get('apiKey') || '';
+$('saveKey').onclick = () => { store.set('apiKey', $('key').value.trim()); status('API Key 已儲存。'); };
+for (let i = localStorage.length - 1; i >= 0; i--) {
+  const k = localStorage.key(i);
+  if (k?.startsWith('price:') && Date.now() - (store.get(k)?.t || 0) > CACHE_DAYS * 864e5) localStorage.removeItem(k);
+}
+</script>
+</body>
+</html>
